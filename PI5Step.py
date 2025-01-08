@@ -11,23 +11,23 @@ class Stepper(Enum):
 
 # Configuration Constants
 STEPS_PER_REV = 200  # fix
-StepperA_enable = 9  # 9 white, 11 black#fix
-StepperB_enable = 10  # 10 white, 9 black#fix
+StepperA_enable = 24  # 9 white, 11 black#fix
+StepperB_enable = 25  # 10 white, 9 black#fix
 
-home_switch1 = 7  # fix
-home_switch2 = 6  # fix
+home_switch1 = 8  # fix
+home_switch2 = 7  # fix
 
 DISTANCE = 3200  # Total number of steps to move#fix
-StepperA_STEP_PIN = 3  # Changed to match Arduino pin 3#fix
-StepperB_STEP_PIN = 5  # Changed to match Arduino pin 5#fix
+StepperA_STEP_PIN = 17  # Changed to match Arduino pin 3#fix
+StepperB_STEP_PIN = 23  # Changed to match Arduino pin 5#fix
 
-StepperA_DIR_PIN = 2  # Changed to match Arduino pin 2#fix
-StepperB_DIR_PIN = 4  # Changed to match Arduino pin 4#fix
+StepperA_DIR_PIN = 27  # Changed to match Arduino pin 2#fix
+StepperB_DIR_PIN = 22  # Changed to match Arduino pin 4#fix
 
 # PELLET ARM MOTOR PINS
-relay1 = 11  # Arduino pin that triggers relay #1#fix
-relay2 = 12  # Arduino pin that triggers relay #2#fix
-IRBreakerPin = 0  # fix
+relay1 = 6 # Arduino pin that triggers relay #1#fix
+relay2 = 5 # Arduino pin that triggers relay #2#fix
+IRBreakerPin = 26  # fix
 IRState = False
 
 
