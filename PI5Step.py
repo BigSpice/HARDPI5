@@ -1,7 +1,23 @@
-import RPi.GPIO as GPIO
+#REQUIRED 
+
+#RPi.GPIO
+# SPI   ON
+
 from time import sleep
 from enum import Enum
 import sys
+import subprocess
+import importlib.util
+
+try:
+    import RPi.GPIO as GPIO
+except ImportError:
+ # List of required packages
+    required_packages = ["RPi.GPIO"]
+    
+    # Install each required package
+    for package in required_packages:
+        install_package(package)
 
 
 class Stepper(Enum):
@@ -29,6 +45,33 @@ relay1 = 6 # Arduino pin that triggers relay #1#fix
 relay2 = 5 # Arduino pin that triggers relay #2#fix
 IRBreakerPin = 26  # fix
 IRState = False
+
+
+
+def install_package(package_name):
+    """
+    Check if a package is installed, and install it if it isn't.
+    
+    Args:
+        package_name (str): Name of the package to install
+        
+    Returns:
+        bool: True if package is/was installed successfully, False otherwise
+    """
+    # Check if the package is already installed
+    if importlib.util.find_spec(package_name) is None:
+        print(f"{package_name} not found. Installing...")
+        try:
+            # Install the package using pip
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+            print(f"Successfully installed {package_name}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"Error installing {package_name}: {e}")
+            return False
+    else:
+        print(f"{package_name} is already installed")
+        return True
 
 
 def setup():
