@@ -11,9 +11,10 @@ import importlib.util
 
 try:
     import RPi.GPIO as GPIO
+    from picamera2 import Picamera2
 except ImportError:
  # List of required packages
-    required_packages = ["RPi.GPIO"]
+    required_packages = ["RPi.GPIO","picamera2"]
     
     # Install each required package
     for package in required_packages:
@@ -46,7 +47,19 @@ relay2 = 5 # Arduino pin that triggers relay #2#fix
 IRBreakerPin = 26  # fix
 IRState = False
 
+# Stage home coordinates (you can adjust these values based on your needs)
+STAGE_HOME_A = 1000  # Steps from home position for motor A
+STAGE_HOME_B = 1000  # Steps from home position for motor B
 
+# Camera settings
+CAMERA_RESOLUTION = (640, 480)
+CAMERA_FRAMERATE = 100
+RECORDING_DURATION = 8  # seconds
+SEQUENCE_ITERATIONS = 5
+
+# Recording directory
+RECORDING_DIR = "recordings"
+os.makedirs(RECORDING_DIR, exist_ok=True)
 
 def install_package(package_name):
     """
@@ -170,13 +183,105 @@ def home_motors():
 
     GPIO.output(StepperB_enable, GPIO.HIGH)
 
+def start_recording(picam):
+    """Initialize and start camera recording"""
+    # Create timestamp for unique filename
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    recording_path = f"recordings/recording_{timestamp}.mp4"
+    
+    # Ensure recordings directory exists
+    os.makedirs("recordings", exist_ok=True)
+    
+    # Configure camera
+    picam.configure(picam.create_video_configuration(
+        main={"size": (640, 480), "format": "RGB888"},
+        controls={"FrameRate": 100.0}
+    ))
+    
+    # Start recording
+    picam.start_recording(recording_path)
+    return recording_path
+
+def automated_sequence():
+    """Execute the full automated sequence"""
+    try:
+        # Initialize camera
+        picam = Picamera2()
+        
+        # First home both motors
+        print("Homing motors...")
+        home_motors()
+        sleep(1)
+        
+        # Move to stage home coordinates
+        print("Moving to stage home position...")
+        step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, True, STAGE_HOME_A)
+        step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, True, STAGE_HOME_B)
+        sleep(1)
+        
+        # Repeat sequence 5 times
+        for iteration in range(5):
+            print(f"Starting iteration {iteration + 1}/5")
+            
+            # Present pellet
+            print("Presenting pellet...")
+            extend_actuator()
+            sleep(1)
+            
+            # Start recording
+            print("Starting camera recording...")
+            recording_file = start_recording(picam)
+            print(f"Recording to: {recording_file}")
+            
+            # Record for 8 seconds
+            sleep(8)
+            
+            # Drop pellet hand
+            print("Retracting actuator...")
+            retract_actuator()
+            sleep(1.3)
+            stop_actuator()
+            
+            # Stop recording
+            picam.stop_recording()
+            print("Recording stopped")
+            
+            # Wait between iterations
+            sleep(2)
+        
+        # Return to home position
+        print("Returning to home position...")
+        home_motors()
+        
+        # Clean up
+        picam.close()
+        print("Sequence completed successfully")
+        
+    except Exception as e:
+        print(f"Error during sequence: {e}")
+        # Ensure camera is properly closed in case of error
+        try:
+            picam.close()
+        except:
+            pass
+        raise
 
 def main_loop():
     """Main loop"""
     try:
         while True:
+            print("\nCurrent Status:")
             print(f"home_switch1 --> {GPIO.input(home_switch1)}")
             print(f"home_switch2 --> {GPIO.input(home_switch2)}")
+            print("\nCommands:")
+            print("b - Move Stepper A forward")
+            print("a - Move Stepper A backward")
+            print("d - Move Stepper B forward")
+            print("c - Move Stepper B backward")
+            print("i - Run HASRA 2024 STEPPER TEST")
+            print("s - Run Automated Sequence")
+            print("h - Home motors")
+            print("q - Quit")
 
             if GPIO.input(IRBreakerPin) == GPIO.HIGH:
                 print("MOUSE LEFT")
@@ -185,26 +290,34 @@ def main_loop():
                 print("MOUSE IN")
                 IRState = True
 
-                char = sys.stdin.read(1)
+            char = input("Enter command: ").lower()
 
-                if char == 'b':
-                    step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, True, 100)
-                elif char == 'a':
-                    step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, False, 100)
-                elif char == 'd':
+            if char == 'b':
+                step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, True, 100)
+            elif char == 'a':
+                step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, False, 100)
+            elif char == 'd':
+                step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, True, 100)
+            elif char == 'c':
+                step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, False, 100)
+            elif char == 'i':
+                # HASRA 2024 STEPPER TEST sequence
+                print("HASRA 2024 STEPPER TEST")
+                for _ in range(8):
                     step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, True, 100)
-                elif char == 'c':
-                    step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, False, 100)
-                elif char == 'i':
-                    # HASRA 2024 STEPPER TEST sequence
-                    print("HASRA 2024 STEPPER TEST")
-                    for _ in range(8):
-                        step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, True, 100)
-                    for _ in range(8):
-                        step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, True, 100)
-                    present_pellet()
-                else:
-                    home_motors()
+                for _ in range(8):
+                    step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, True, 100)
+                present_pellet()
+            elif char == 's':
+                print("Starting Automated Sequence...")
+                automated_sequence()
+            elif char == 'h':
+                home_motors()
+            elif char == 'q':
+                print("Quitting program...")
+                break
+            else:
+                print("Invalid command")
 
             sleep(0.4)  # Main loop delay
 
@@ -213,6 +326,8 @@ def main_loop():
         print("\nProgram terminated by user")
     except Exception as e:
         print(f"Error: {e}")
+        GPIO.cleanup()
+    finally:
         GPIO.cleanup()
 
 
