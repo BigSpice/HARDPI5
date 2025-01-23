@@ -1,152 +1,144 @@
 import cv2
 import time
-import os
-from threading import Thread
 from datetime import datetime
+import os
+import threading
+import queue
 
-class WebcamStream:
-    def __init__(self, stream_id=0, record_fps=100, record_folder='recordings'):
-        self.stream_id = stream_id   # default is 0 for primary camera 
+class VideoRecorder:
+    def __init__(self, width=640, height=360, fps=200, duration_seconds=10, output_dir='recordings'):
+       
+
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.duration_seconds = duration_seconds
+        self.output_dir = output_dir
         
-        # Create recordings folder if it doesn't exist
-        self.record_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), record_folder)
-        os.makedirs(self.record_folder, exist_ok=True)
+        # Thread-safe queue for frames
+        self.frame_queue = queue.Queue(maxsize=3000)  # Limit queue size to prevent memory issues
         
-        # Set recording parameters
-        self.record_fps = record_fps
-        self.is_recording = False
-        self.video_writer = None
+        # Threading flags and events
+        self.is_recording = threading.Event()
+        self.stop_event = threading.Event()
         
-        # opening video capture stream 
-        self.vcap = cv2.VideoCapture(self.stream_id)
-        if self.vcap.isOpened() is False:
-            print("[Exiting]: Error accessing webcam stream.")
-            exit(0)
+        # Performance tracking
+        self.frame_count = 0
+        self.dropped_frames = 0
+
+    def setup_camera(self):
+        cap = cv2.VideoCapture(0)  # 0 is usually the first USB camera
         
-        # Get input stream FPS
-        fps_input_stream = int(self.vcap.get(cv2.CAP_PROP_FPS))
-        print(f"FPS of webcam hardware/input stream: {fps_input_stream}")
+        # Set resolution
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         
-        # Get video capture properties
-        self.width = int(self.vcap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self.vcap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # Set FPS
+        cap.set(cv2.CAP_PROP_FPS, self.fps)
         
-        # reading a single frame from vcap stream for initializing 
-        self.grabbed, self.frame = self.vcap.read()
-        if self.grabbed is False:
-            print('[Exiting] No more frames to read')
-            exit(0)
+        # Check actual parameters achieved
+        actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
         
-        # self.stopped is set to False when frames are being read from self.vcap stream 
-        self.stopped = True 
+        print(f"Requested settings: {self.width}x{self.height} at {self.fps}fps")
+        print(f"Actual settings: {actual_width}x{actual_height} at {actual_fps}fps")
         
-        # reference to the thread for reading next available frame from input stream 
-        self.t = Thread(target=self.update, args=())
-        self.t.daemon = True # daemon threads keep running in the background while the program is executing 
+        return cap
+
+    def capture_frames(self, cap):
         
-    def start(self):
-        self.stopped = False
-        self.t.start() 
+        try:
+            while not self.stop_event.is_set():
+                ret, frame = cap.read()
+                if not ret:
+                    print("Error: Couldn't read frame")
+                    break
+                
+                try:
+                    if not self.frame_queue.full():
+                        self.frame_queue.put_nowait(frame)
+                        self.frame_count += 1
+
+                    else:  
+                        print(f"Dropped at {self.frame_count} in capture thread.")
+                        self.dropped_frames += 1
+                except queue.Full:
+                    self.dropped_frames += 1
+                    print(f"Dropped at {self.frame_count} in Queu Full.")
+
+        
+        except Exception as e:
+            print(f"Error in capture thread: {e}")
+        
+        finally:
+            self.is_recording.clear()
+            cap.release()
+
+    def write_frames(self, out):
+       
+        try:
+            while not self.stop_event.is_set() or not self.frame_queue.empty():
+                try:
+                    frame = self.frame_queue.get(timeout=1)
+                    out.write(frame)
+                except queue.Empty:
+                    continue
+        
+        except Exception as e:
+            print(f"Error in writer thread: {e}")
+        
+        finally:
+            out.release()
+
+    def record_video(self):
+ 
+        os.makedirs(self.output_dir, exist_ok=True)
     
-    def update(self):
-        while True:
-            if self.stopped is True:
-                break
-            self.grabbed, self.frame = self.vcap.read()
-            if self.grabbed is False:
-                print('[Exiting] No more frames to read')
-                self.stopped = True
-                break 
-        self.vcap.release()
-    
-    def read(self):
-        return self.frame
-    
-    def stop(self):
-        self.stopped = True 
-        if self.video_writer:
-            self.video_writer.release()
-    
-    def start_recording(self):
-        # Generate unique filename with timestamp
+        cap = self.setup_camera()
+        
+        if not cap.isOpened():
+            print("Error: Could not open camera")
+            return
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_filename = os.path.join(self.record_folder, f'recording_{timestamp}.avi')
+        output_file = os.path.join(self.output_dir, f'recording_{timestamp}.mp4')
         
-        # Define the codec and create VideoWriter object
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-        self.video_writer = cv2.VideoWriter(
-            output_filename, 
-            fourcc, 
-            self.record_fps, 
-            (self.width, self.height)
-        )
-        self.is_recording = True
-        print(f"Started recording to {output_filename}")
-    
-    def stop_recording(self):
-        if self.video_writer:
-            self.video_writer.release()
-            self.is_recording = False
-            print("Stopped recording")
-    
-    def write_frame(self, frame):
-        if self.is_recording and self.video_writer:
-            self.video_writer.write(frame)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_file, fourcc, self.fps, (self.width, self.height))
+        self.frame_count = 0
+        self.dropped_frames = 0
+        start_time = time.time()
+        self.is_recording.clear()
+        self.stop_event.clear()
+        
+        try:
+            capture_thread = threading.Thread(target=self.capture_frames, args=(cap,))
+            writer_thread = threading.Thread(target=self.write_frames, args=(out,))
+            writer_thread.start()
+            capture_thread.start()
+            time.sleep(self.duration_seconds)
+            self.stop_event.set()
+            capture_thread.join()
+            writer_thread.join()
+        
+        except KeyboardInterrupt:
+            print("\nRecording stopped by user")
+        
+        finally:
+            elapsed_time = time.time() - start_time
+            average_fps = self.frame_count / elapsed_time
+            
+            print(f"\nRecording finished:")
+            print(f"Saved to: {output_file}")
+            print(f"Average FPS: {average_fps:.2f}")
+            print(f"Total frames captured: {self.frame_count}")
+            print(f"Dropped frames: {self.dropped_frames}")
+            print(f"Duration: {elapsed_time:.2f} seconds")
 
-# Main execution
 def main():
-    # initializing and starting multi-threaded webcam capture input stream 
-    webcam_stream = WebcamStream(stream_id=0, record_fps=30)  # stream_id = 0 is for primary camera 
-    webcam_stream.start()
-    
-    # processing frames in input stream
-    num_frames_processed = 0 
-    start = time.time()
-    
-    try:
-        while True:
-            if webcam_stream.stopped is True:
-                break
-            else:
-                frame = webcam_stream.read() 
-            
-            # Display frame
-            cv2.imshow('frame', frame)
-            
-            # Handle key presses
-            key = cv2.waitKey(1)
-            
-            # Start recording when 'r' is pressed
-            if key == ord('r'):
-                webcam_stream.start_recording()
-            
-            # Stop recording when 's' is pressed
-            elif key == ord('s'):
-                webcam_stream.stop_recording()
-            
-            # Write frame if recording
-            if webcam_stream.is_recording:
-                webcam_stream.write_frame(frame)
-            
-            # Quit when 'q' is pressed
-            if key == ord('q'):
-                break
-            
-            num_frames_processed += 1
-            
-            # Control frame rate (optional)
-            time.sleep(1/30)  # 30 FPS
-    
-    finally:
-        # Cleanup
-        webcam_stream.stop()
-        cv2.destroyAllWindows()
-    
-    # Calculate and print performance metrics
-    end = time.time()
-    elapsed = end - start
-    fps = num_frames_processed / elapsed 
-    print(f"FPS: {fps}, Elapsed Time: {elapsed}, Frames Processed: {num_frames_processed}")
+    recorder = VideoRecorder(duration_seconds=10, fps=320)
+    recorder.record_video()
 
 if __name__ == "__main__":
     main()
