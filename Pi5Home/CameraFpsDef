@@ -1,0 +1,106 @@
+import cv2
+import numpy as np
+import threading
+import queue
+import time
+
+class VideoRecorder:
+    def __init__(self, output_filename, width=1920, height=1080, fps=120):
+        """
+        Initialize video recorder with support for high frame rates
+        
+        Args:
+            output_filename (str): Path to save recorded video
+            width (int): Video width in pixels
+            height (int): Video height in pixels
+            fps (int): Target recording frame rate
+        """
+        self.output_filename = output_filename
+        self.width = width
+        self.height = height
+        self.fps = fps
+        
+        # Robust video writer for high FPS
+        self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        self.out = cv2.VideoWriter(output_filename, self.fourcc, self.fps, (width, height))
+        
+        # Preview window configuration
+        self.preview_window_name = "Live Preview"
+        cv2.namedWindow(self.preview_window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.preview_window_name, 640, 360)
+        
+        # Frame queue for smooth recording
+        self.frame_queue = queue.Queue(maxsize=500)
+        self.is_recording = False
+        
+        # Performance tracking
+        self.dropped_frames = 0
+        
+    def start_preview(self, capture_device=0):
+        """Start live preview with FPS display"""
+        self.cap = cv2.VideoCapture(capture_device)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        
+        def preview_thread():
+            while self.is_recording or self.preview_active:
+                ret, frame = self.cap.read()
+                if not ret:
+                    break
+                
+                # Display current FPS on frame
+                cv2.putText(frame, f"FPS: {self.fps}", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                
+                cv2.imshow(self.preview_window_name, frame)
+                cv2.waitKey(1)
+        
+        self.preview_active = True
+        threading.Thread(target=preview_thread, daemon=True).start()
+        
+    def record(self):
+        """High-performance recording method with queue processing"""
+        self.is_recording = True
+        
+        def recording_thread():
+            while self.is_recording:
+                try:
+                    frame = self.frame_queue.get(timeout=1)
+                    self.out.write(frame)
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    print(f"Recording error: {e}")
+                    break
+        
+        threading.Thread(target=recording_thread, daemon=True).start()
+        
+    def add_frame(self, frame):
+        """Add frame to recording queue with overflow handling"""
+        try:
+            if not self.frame_queue.full():
+                self.frame_queue.put_nowait(frame)
+            else:
+                self.dropped_frames += 1
+        except queue.Full:
+            self.dropped_frames += 1
+        
+    def stop(self):
+        """Cleanly stop recording and release resources"""
+        self.is_recording = False
+        self.preview_active = False
+        
+        self.out.release()
+        self.cap.release()
+        cv2.destroyAllWindows()
+        
+        print(f"Recording stopped. Dropped frames: {self.dropped_frames}")
+
+# Example usage
+recorder = VideoRecorder("output.mp4", fps=240)
+recorder.start_preview()
+recorder.record()
+# Capture frames and add to recorder
+# recorder.add_frame(frame)
+# recorder.stop()
