@@ -12,7 +12,7 @@ import cv2
 import time
 from datetime import datetime
 import os
-
+global CurrentMouseTagID,NumberOfTests,StartupTime,MiceEvaluated,SessionID,ProfileID,MaxTestTime,MinTestTime,ArmHoldWaitingTime,RFID_PORT,ARDUINO_PORT
 def install_package(package_name):
     """
     Check if a package is installed, and install it if it isn't.
@@ -52,6 +52,66 @@ except ImportError:
     # Install each required package
     for package in required_packages:
         install_package(package)
+
+
+class RFIDReader:
+    def __init__(self, port='/dev/ttyUSB1', baudrate=9600, timeout=1):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.serial = None
+
+    def connect(self):
+        try:
+            self.serial = serial.Serial(
+                port=self.port,
+                baudrate=self.baudrate,
+                timeout=self.timeout
+            )
+            print(f"Successfully connected to {self.port}")
+            return True
+        except serial.SerialException as e:
+            print(f"Error connecting to {self.port}: {str(e)}")
+            return False
+
+    def disconnect(self):
+        if self.serial and self.serial.is_open:
+            self.serial.close()
+            print("Disconnected from RFID reader")
+
+    def read_tag_id(self):
+        tagdata = None
+        if not self.serial or not self.serial.is_open:
+            print("Error: Serial connection not established")
+            return ''
+
+        try:
+            while True:
+                self.serial.reset_input_buffer()
+            
+                data = self.serial.read(12)
+            
+                if len(data) == 12:
+                    tag_id = data[4:9].hex().upper()
+                    return tag_id
+                #return ''
+            
+        except serial.SerialException as e:
+            print(f"Error reading tag: {str(e)}")
+            return ''
+
+    def Endless_print_tag_id(self):
+        try:
+            print("Starting tag reading. Press Ctrl+C to stop.")
+            while True:
+                tag_id = self.read_tag_id()
+                if tag_id:
+                    print(f"Tag detected - ID: {tag_id}")
+                time.sleep(2)  
+                
+        except KeyboardInterrupt: #Change to beam breaker
+            print("\nStopping tag reading")
+            self.disconnect()
 
 
 class Stepper(Enum):
@@ -324,6 +384,18 @@ def test_actuator_cycle():
         # Ensure actuator is stopped in case of error
         stop_actuator()
 
+
+
+def READTAG(self):
+    reader = RFIDReader(port='/dev/ttyUSB1')  
+    if reader.connect():
+        tag_id = reader.read_tag_id()
+        if tag_id:
+            print(f"Single read - Tag ID: {tag_id}")
+            return tag_id
+            #reader.Endless_print_tag_id()
+        
+        
 def automated_sequence():
     """Execute the full automated sequence"""
     try:
@@ -338,7 +410,7 @@ def automated_sequence():
         step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, True, STAGE_HOME_A)
         step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, True, STAGE_HOME_B)
         sleep(1)
-
+        CurrentMouseTagID = READTAG
         # Repeat sequence 5 times
         for iteration in range(5):
             print(f"Starting iteration {iteration + 1}/5")
