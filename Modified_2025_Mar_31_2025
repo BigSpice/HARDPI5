@@ -530,11 +530,11 @@ class PiezoRecorder:
 
     def __init__(self):
 
-        self.SERIAL_PORT = Get_usb_devices(ARDUINO_USB_SERIAL_IDENTIFICATION_STRING)
+        #self.SERIAL_PORT = Get_usb_devices(ARDUINO_USB_SERIAL_IDENTIFICATION_STRING)
 
-        if self.SERIAL_PORT == None:
+        
 
-            self.SERIAL_PORT = '/dev/ttyUSB0'
+        self.SERIAL_PORT = '/dev/ttyUSB0'
 
         self.BAUD_RATE = 230400
 
@@ -2056,11 +2056,11 @@ class Periphals:
 
     def __init__(self):
 
-        self.RFID_SER = Get_usb_devices(RFID_USB_SERIAL_IDENTIFICATION_STRING)
+        #self.RFID_SER = Get_usb_devices(RFID_USB_SERIAL_IDENTIFICATION_STRING)
 
-        if self.RFID_SER == None:
+        #if self.RFID_SER == None:
 
-            self.RFID_SER = '/dev/ttyUSB1'
+        self.RFID_SER = '/dev/ttyUSB1'
 
             
 
