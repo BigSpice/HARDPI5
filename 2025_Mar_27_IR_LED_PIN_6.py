@@ -3062,29 +3062,28 @@ if __name__ == "__main__":
 
     run_system(tracker)
 '''
-#glbal flag for IR interruptio
-global IR_INTERRUPT
-IR_INTERRUPT = False
 
-def quick_ir_check(self):
-    global IR_INTERRUPT
+global Interrupt_, IRState
+----------------->>>>>Interrupt_ = False
+->>>>>>>>>>>>>IRState = False
+
+def check_ir_breaker():
+    global Interrupt_, IRState
     try:
-        if GPIO.input(IRBreakerPin) == GPIO.HIGH:
-            IRState = False
-            Interrupt_ = True
-            IR_INTERRUPT = True  # Set the global IR interrupt flag
-            print(f"IR_CHECK_IN:{str(IRState)}")
-        else:
-            print("MOUSE IN!....Awaiting RFID TAG")
-            IRState = True
-            return True
+        while True:
+            if GPIO.input(IRBreakerPin) == GPIO.HIGH:
+                IRState = False
+                Interrupt_ = True
+                print(f"IR_CHECK_IN:{str(IRState)}")
+            else:
+                print("MOUSE IN!....Awaiting RFID TAG")
+                IRState = True
+            time.sleep(0.1)  # Sleep briefly to avoid busy-waiting
     except Exception as e:
         print(f"Error reading IR breaker: {str(e)}")
-        return False
 
-# Modify the main function to check for IR interruption
 def main(SingleTrackedData, Mouse_Dir, periphals_instance):
-    global RECORDING_DIR, NUM_TRIALS_PER_MOUSE, IR_INTERRUPT
+    global RECORDING_DIR, NUM_TRIALS_PER_MOUSE, Interrupt_
     RECORDING_DIR = os.path.join(Mouse_Dir, "Video_Recordings")
     StepperManager_ = StepperManager()
     try:
@@ -3115,8 +3114,8 @@ def main(SingleTrackedData, Mouse_Dir, periphals_instance):
             StepperManager_.step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, True, Y_HOME_POS)
             time.sleep(1)
             while trials_completed_today < NUM_TRIALS_PER_MOUSE:
-                # Check for IR interruption before starting a new trial
-                if IR_INTERRUPT:
+                # Check for interruption before starting a new trial
+                if Interrupt_:
                     print("IR beam broken, suspending test.")
                     return trials_completed_today
 
@@ -3181,9 +3180,100 @@ def main(SingleTrackedData, Mouse_Dir, periphals_instance):
         print("MOUSE LEFT!")
         return trials_completed_today
 
-if __name__ == "__main__":
-    tracker = GlobalMouseTracker()
-    tracker.load_config()
-    setup(tracker)
-    run_system(tracker)
+def run_system(tracker):
+    admin_Open = False
+    time.sleep(0.2)
+    display_welcome_banner()
+    global Interrupt_
+    Interrupt_ = False
+    if debug_mode:
+        print("\n\n\nATTENTION\n\n !Debug_Mode_Enabled! \n -Verbose Output Enabled\n")
+        print("Press any key for admin menu (waiting 5 seconds)...")
+        timeout = time.time() + 1
+        while time.time() < timeout:
+            if input_available():
+                admin_menu()
+                break
+    Current_Mouse = SingleTrackedData()
+    periphals_instance = Periphals()
+    Current_Mouse.tracker = tracker
+    led = IRLedControl()
+    led.off()
+
+    # Start the IR breaker checking thread
+    ir_thread = threading.Thread(target=check_ir_breaker)
+    ir_thread.daemon = True
+    ir_thread.start()
+
+    while True:
+        global RFID_TAG_RAW
+        RFID_TAG_RAW = None
+        if wait_for_mouse(RFID_TAG_RAW):
+            mouse_id = RFID_TAG_RAW 
+            led.on()
+             # Function to get the current mouse ID
+           # tracker.update_tracking(RFID_TAG_RAW, trials=0, test_time=0)
+            Tracker_Data = Current_Mouse.tracker.get_mouse_data(mouse_id)
+            Current_Mouse.normal_id = tracker._get_normal_id(mouse_id)
+            Current_Mouse.raw_id = tracker.RAW_ID
+            Current_Mouse.trial_count = Tracker_Data['trial_count']
+            Current_Mouse.test_time = Tracker_Data['test_time']
+            Current_Mouse.last_seen = Tracker_Data['last_seen']
+            print(f"Mouse Last seen: {Current_Mouse.last_seen}")
+            if Current_Mouse != None:
+                print(f"\nTrials: {Current_Mouse.trial_count}, Time: {Current_Mouse.test_time} \n")
+            Old_Count =  Current_Mouse.trial_count
+            Old_Test_time_today =  Current_Mouse.test_time
+        global MOUSE_DIR
+        MOUSE_DIR = os.path.join(HOME_DIR, str(Current_Mouse.normal_id) +" - " + str(Current_Mouse.raw_id) + "/" + str(datetime.now().strftime("%d-%m-%Y")) )
+        LOG_DIR = os.path.join(MOUSE_DIR, "Logs")
+        try:
+            os.makedirs(MOUSE_DIR, exist_ok=True)
+            os.makedirs(LOG_DIR, exist_ok=True)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return
+
+        tracker.trial_log_file = os.path.join(LOG_DIR, str(datetime.now().strftime("%d-%m-%Y")) + "_trial_logs_.csv")
+        tracker._ensure_trial_log_exists()
+        if Current_Mouse.last_seen == str(datetime.now().strftime("%d-%m-%Y")):
+            while periphals_instance.quick_ir_check() != False:
+                if Current_Mouse.trial_count < NUM_TRIALS_PER_MOUSE and Current_Mouse.test_time < MAX_DAILY_TIME_MIN:
+                    trials_completed = main(Current_Mouse, MOUSE_DIR, periphals_instance)
+                    print(f"Trails{trials_completed}")
+                    #if trials_completed >= 0:
+                        #tracker.update_tracking(RFID_TAG_RAW, Current_Mouse.trail_num_total , Current_Mouse.total_trail_time)
+                    time.sleep(2)
+                    print(f"\nMouse ID {mouse_id} has completed attempts, restarting.")
+                    led.off()
+                    break
+                else:
+                    led.off()
+                    print(f"\nMouse ID {mouse_id} has exceeded daily trials or test time.")
+                    print(f"\nRechecking in 10 Seconds For another mouse Without the ID {mouse_id}\n\n\n")                
+                    break
+            else:
+                led.off()
+                print(f"\n\nMouse ID {mouse_id} has Left")
+                time.sleep(5)
+                break
+        else:
+            Current_Mouse.trial_count = 0
+            Current_Mouse.test_time = 0 
+            while Interrupt_ != True:
+                trials_completed = main(Current_Mouse, MOUSE_DIR, periphals_instance)
+                print(f"Trails{trials_completed}")
+                #if trials_completed >= 0:
+                    #tracker.update_tracking(RFID_TAG_RAW, Current_Mouse.trail_num_total , Current_Mouse.total_trail_time)
+                print(f"\nMouse ID {mouse_id} has exceeded daily trials or test time.")
+                print(f"\nRechecking in 10 Seconds For another mouse Without the ID {mouse_id}\n\n\n")
+                led.off()
+                time.sleep(10)
+                break
+            else:
+                led.off()
+                print(f"\n\nMouse ID {mouse_id} has Left")
+                time.sleep(5)
+                break
+
 '''
