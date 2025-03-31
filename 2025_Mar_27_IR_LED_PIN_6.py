@@ -3061,4 +3061,129 @@ if __name__ == "__main__":
     setup(tracker)
 
     run_system(tracker)
+'''
+#glbal flag for IR interruptio
+global IR_INTERRUPT
+IR_INTERRUPT = False
 
+def quick_ir_check(self):
+    global IR_INTERRUPT
+    try:
+        if GPIO.input(IRBreakerPin) == GPIO.HIGH:
+            IRState = False
+            Interrupt_ = True
+            IR_INTERRUPT = True  # Set the global IR interrupt flag
+            print(f"IR_CHECK_IN:{str(IRState)}")
+        else:
+            print("MOUSE IN!....Awaiting RFID TAG")
+            IRState = True
+            return True
+    except Exception as e:
+        print(f"Error reading IR breaker: {str(e)}")
+        return False
+
+# Modify the main function to check for IR interruption
+def main(SingleTrackedData, Mouse_Dir, periphals_instance):
+    global RECORDING_DIR, NUM_TRIALS_PER_MOUSE, IR_INTERRUPT
+    RECORDING_DIR = os.path.join(Mouse_Dir, "Video_Recordings")
+    StepperManager_ = StepperManager()
+    try:
+        os.makedirs(RECORDING_DIR, exist_ok=True)
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+    trials_completed_today = SingleTrackedData.trial_count
+    tracker = SingleTrackedData.tracker
+    Trail_Elements = []
+    print(f"Starting trials for mouse with RFID: {RFID_TAG_RAW}")
+    print("Starting Automated Sequence...")
+    Interrupt_ = False
+    PIEZO_DIR = os.path.join(Mouse_Dir, "Piezo_Recordings")
+
+    while not Interrupt_:
+        trial_start = time.time()
+        max_duration = MAX_RECORDING_TIME_MIN * 60
+        completed = False
+        interrupted = False
+        print("Homing motors...")
+        StepperManager_.home_motors()
+        time.sleep(1.1)
+        try:
+            # Move to stage home coordinates
+            print("Moving to stage Test position...")
+            StepperManager_.step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, True, X_HOME_POS)
+            StepperManager_.step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, True, Y_HOME_POS)
+            time.sleep(1)
+            while trials_completed_today < NUM_TRIALS_PER_MOUSE:
+                # Check for IR interruption before starting a new trial
+                if IR_INTERRUPT:
+                    print("IR beam broken, suspending test.")
+                    return trials_completed_today
+
+                # Present pellet
+                print("Presenting pellet...")
+                if (present_pellet(RFID_TAG_RAW, NUM_TRIALS_PER_MOUSE, ProfileID, periphals_instance, trials_completed_today, PIEZO_DIR)):
+                    print("Iteration_Complete")
+                    completed = True
+                    interrupted = False
+                    trials_completed_today += 1
+                    trial_end = time.time()
+                    trial_duration = trial_end - trial_start
+                    new_trail_element = Trail_Element(trials_completed_today, trial_duration, completed, interrupted, RFID_TAG_RAW)
+                    Trail_Elements.append(new_trail_element)
+                else:
+                    if periphals_instance.quick_ir_check() != False:
+                        print("IR BREAK")
+                        break
+                    print("Sequence Failed")
+                    completed = False
+                    interrupted = True
+                    trials_completed_today += 1
+                    trial_end = time.time()
+                    trial_duration = trial_end - trial_start
+                    new_trail_element = Trail_Element(trials_completed_today, trial_duration, completed, interrupted, RFID_TAG_RAW)
+                    Trail_Elements.append(new_trail_element)
+
+                # Wait between iterations
+                time.sleep(1.5)
+                # Check for time limit
+                if (time.time() - trial_start) >= max_duration:
+                    completed = True
+                    interrupted = True
+                    print("Time Exceeded! - Exiting!")
+                    break
+
+            else:
+                trial_end = time.time()
+                trial_duration = trial_end - trial_start
+                # Return to home position
+                # Clean up
+                print("Sequences completed successfully")
+                print(f"Sessions complete: {trials_completed_today} trials")
+                print("Returning to home position...")
+                periphals_instance.extend_actuator()
+                StepperManager_.home_motors()
+                for trail_element in Trail_Elements:
+                    tracker.log_trial(
+                        trail_element.rfid_tag,          # RFID_TAG_RAW
+                        trail_element.trial_duration,   # trial_duration
+                        trail_element.completed,        # completed
+                        trail_element.interrupted       # interrupted
+                    )
+                    SingleTrackedData.add_trail_element(Trail_Element(trials_completed_today, trial_duration, completed, interrupted, RFID_TAG_RAW))
+                time.sleep(0.5)
+                tracker.update_tracking(RFID_TAG_RAW, trials_completed_today, trial_duration)
+                return trials_completed_today
+        except ValueError as e:
+            print(f"Error: {e}")
+            return trials_completed_today
+    else:
+        print("MOUSE LEFT!")
+        return trials_completed_today
+
+if __name__ == "__main__":
+    tracker = GlobalMouseTracker()
+    tracker.load_config()
+    setup(tracker)
+    run_system(tracker)
+'''
