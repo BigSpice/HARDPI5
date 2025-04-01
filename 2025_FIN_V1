@@ -21,6 +21,7 @@ from datetime import datetime
 import os
 
 import importlib
+from datetime import datetime
 
 
 
@@ -70,7 +71,7 @@ global THRESHOLD_EXCEEDED
 
 global RFID_USB_SERIAL_IDENTIFICATION_STRING, ARDUINO_USB_SERIAL_IDENTIFICATION_STRING, CAMERA_USB_SERIAL_IDENTIFICATION_STRING
 
-global RPI_PIN_IR_LED_ARRAY
+global RPI_PIN_IR_LED_ARRAY , USE_PEZO_TRIGGER
 
 
 
@@ -102,10 +103,12 @@ try:
 
     from asgiref.sync import async_to_sync
 
+    import aiofiles
 
 
     import serial
 
+    import inspect
 
 
     import queue
@@ -115,6 +118,7 @@ try:
     import cv2
 
 
+    import aiocsv
 
     import importlib.util
 
@@ -142,7 +146,7 @@ except ImportError:
 
 
 
-    required_packages = ["RPi.GPIO", "asyncio", "asgiref", "serial", "configparser"]
+    required_packages = ["RPi.GPIO","aiofiles","aiocsv", "asyncio", "asgiref", "serial", "configparser"]
 
 
 
@@ -222,11 +226,9 @@ def install_package(package_name):
 
 def setup(tracker):
 
-  
-
     Add_Tracker_Data_To_Global_Sheet()
 
-    """Initialize GPIO settings"""
+    #Initialize GPIO settings
 
     GPIO.setmode(GPIO.BCM)
 
@@ -296,7 +298,7 @@ def Add_Tracker_Data_To_Global_Sheet():
 
     global RFID_USB_SERIAL_IDENTIFICATION_STRING, ARDUINO_USB_SERIAL_IDENTIFICATION_STRING, CAMERA_USB_SERIAL_IDENTIFICATION_STRING
 
-    global RPI_PIN_IR_LED_ARRAY
+    global RPI_PIN_IR_LED_ARRAY , USE_PEZO_TRIGGER
 
   
 
@@ -375,7 +377,7 @@ def Add_Tracker_Data_To_Global_Sheet():
     
 
     DEBUG = tracker.DEBUG
-
+    USE_PEZO_TRIGGER = tracker.USE_PEZO_TRIGGER
     
 
     THRESHOLD_EXCEEDED = threading.Event()
@@ -439,7 +441,7 @@ class SerialDeviceFinder:
 
 
     def get_tty_serial_to_port_conn(self, device_name_pattern):
-
+        
 
 
         serial_path = '/dev/serial/by-id'
@@ -523,18 +525,18 @@ class PiezoRecorder:
     global Interrupt_
 
     global THRESHOLD_EXCEEDED
-
+    global USE_PEZO_TRIGGER
 
 
 
 
     def __init__(self):
 
-        #self.SERIAL_PORT = Get_usb_devices(ARDUINO_USB_SERIAL_IDENTIFICATION_STRING)
-
-        #if self.SERIAL_PORT == None:
-
-        self.SERIAL_PORT = '/dev/ttyUSB0'
+        self.SERIAL_PORT = Get_usb_devices(ARDUINO_USB_SERIAL_IDENTIFICATION_STRING)
+        
+        if self.SERIAL_PORT == None:
+            
+            self.SERIAL_PORT = '/dev/ttyUSB0'
 
         self.BAUD_RATE = 230400
 
@@ -607,10 +609,15 @@ class PiezoRecorder:
 
 
     def Stop(self):
-
+        
         self.running = False
+        THRESHOLD_EXCEEDED.clear() 
 
-    
+    async def write_data(self, batch):
+        if batch and self.file_path:
+            async with aiofiles.open(self.file_path, mode='a', newline='') as file:
+                writer = aiocsv.AsyncWriter(file)  # No async with
+                await writer.writerows(batch)  # Await writing data   
 
     def writer_task(self):
 
@@ -660,35 +667,29 @@ class PiezoRecorder:
 
                 
 
-                # Write the batch to file
-
-                if batch and self.file_path:
-
-                    with open(self.file_path, 'a', newline='') as f:
-
-                        writer = csv.writer(f)
-
-                        writer.writerows(batch)
+                asyncio.run(self.write_data(batch))
+              
 
             except Exception as e:
 
                 print(f"Error in writer thread: {e}")
 
-    def Stop(self):
+   
 
-        THRESHOLD_EXCEEDED.set()
 
         
 
-    def Record_PelletData(self, MOUSEID, test_number, base_path):
+    def Record_PelletData(self, MOUSEID, test_number, base_path, Cam_Thread):
 
        
 
         global Interrupt_
 
         global THRESHOLD_EXCEEDED
-
         
+        global USE_PEZO_TRIGGER
+        
+        HOLD_DATA = 0.0
 
         try:
 
@@ -727,45 +728,39 @@ class PiezoRecorder:
             self.writer_thread.daemon = True
 
             self.writer_thread.start()
-
             
+            THRESHOLD_EXCEEDED.clear()
 
-            while Interrupt_ != True:
+            while self.running == True:
 
                 if ser.in_waiting > 0:
 
                     line = ser.readline().rstrip()
 
-                    
-
                     try:
 
                         time.sleep(0.5)
 
-                        Data_Out = float(line)
-
                         elapsed_time = (datetime.now() - start_time).total_seconds()
 
                         timestamp = self.format_timestamp(elapsed_time)
+                        
+                        Data_Out = float(line)
 
                         is_hit = Data_Out > self.THRESHOLD
-
                         
-
                         self.append_data(timestamp, Data_Out, is_hit)
-
                         
-
-                        if is_hit and self.BOOL:
-
-                            THRESHOLD_EXCEEDED.set() 
-
-                            Interrupt_ = True 
-
-                            print(f"Threshold exceeded: {Data_Out:.2f}")
-
+                        if is_hit and self.USE_PEZO_TRIGGER == True:
+                            HOLD_DATA = Data_Out
+                            THRESHOLD_EXCEEDED.set()
                             Data_Out = 0.0
-
+                            is_hit = Data_Out
+                            #Cam_Thread.STOP()
+                            self.STOP()
+                            break
+                            
+                        if elapsed_time > MAX_RECORDING_TIME_MIN:
                             break
 
                     except ValueError as e:
@@ -778,8 +773,41 @@ class PiezoRecorder:
 
             else:
 
-                print(f"Threshold exceeded/Test Suspended")
+                print(f"Test Suspended: {HOLD_DATA:.2f}")
+                
+                self.running = False
 
+                if self.writer_thread and self.writer_thread.is_alive():
+    
+                    self.writer_thread.join(timeout=2.0)  
+                
+    
+                remaining_data = []
+    
+                while not self.data_queue.empty():
+    
+                    try:
+    
+                        remaining_data.append(self.data_queue.get_nowait())
+    
+                        self.data_queue.task_done()
+    
+                    except queue.Empty:
+    
+                        break
+    
+                
+                
+    
+                asyncio.run(self.write_data(batch))
+ 
+                        
+                        
+                if 'ser' in locals() and ser.is_open:
+    
+                    ser.close()
+    
+                    print("Serial port closed")
 
 
                         
@@ -794,18 +822,14 @@ class PiezoRecorder:
 
         finally:
 
-            # Stop writer thread
 
             self.running = False
 
             if self.writer_thread and self.writer_thread.is_alive():
 
-                self.writer_thread.join(timeout=2.0)  # Wait for writer to finish
+                self.writer_thread.join(timeout=2.0)  
 
             
-
-            # Process any remaining data in queue
-
             remaining_data = []
 
             while not self.data_queue.empty():
@@ -822,34 +846,11 @@ class PiezoRecorder:
 
             
 
-            if remaining_data and self.file_path:
 
-                with open(self.file_path, 'a', newline='') as f:
+            asyncio.run(self.write_data(remaining_data))
 
-                    writer = csv.writer(f)
-
-                    writer.writerows(remaining_data)
 
             
-
-            # Rename file with duration
-
-            if self.file_path:
-
-                elapsed_time = (datetime.now() - start_time).total_seconds()
-
-                base, ext = os.path.splitext(self.file_path)
-
-                new_file_path = f"{base}_{int(elapsed_time)}s{ext}"
-
-                os.rename(self.file_path, new_file_path)
-
-                print(f"Data saved to: {new_file_path}")
-
-            
-
-            # Close serial port
-
             if 'ser' in locals() and ser.is_open:
 
                 ser.close()
@@ -947,6 +948,8 @@ class GlobalMouseTracker:
         self.RAW_ID = None
 
         self.RPI_PIN_IR_LED_ARRAY = None
+        
+        self.USE_PEZO_TRIGGER = None
 
    
 
@@ -975,26 +978,34 @@ class GlobalMouseTracker:
     def _load_tracking_data(self):
 
         data = {}
+        try:
+            if os.path.exists(TRACKING_FILE):
+    
+                with open(TRACKING_FILE, 'r') as f:
+    
+                    reader = csv.DictReader(f)
+    
+                    for row in reader:
+                        last_seen_datetime = datetime.strptime('last_seen', '%Y-%m-%d %H:%M:%S')
+        
+                        last_seen_seconds = last_seen_datetime.timestamp()
+        
+                        data[row['normal_id']] = {
+    
+                            'trial_count': int(row['trial_count']),
+    
+                            'test_time': float(row['test_time']),
+    
+                            #'last_seen': row['last_seen']last_seen_seconds
+                            'last_seen':last_seen_seconds
+                        }
+                        
+            return data
 
-        if os.path.exists(TRACKING_FILE):
+        except ValueError as e:
 
-            with open(TRACKING_FILE, 'r') as f:
+            print(f"Error: {e}")
 
-                reader = csv.DictReader(f)
-
-                for row in reader:
-
-                    data[row['normal_id']] = {
-
-                        'trial_count': int(row['trial_count']),
-
-                        'test_time': float(row['test_time']),
-
-                        'last_seen': row['last_seen']
-
-                    }
-
-        return data
 
 
 
@@ -1073,7 +1084,14 @@ class GlobalMouseTracker:
         normal_id = self._get_normal_id(raw_id)
 
 
+        last_seen_datetime_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+        last_seen_datetime = datetime.strptime(last_seen_datetime_str, '%Y-%m-%d %H:%M:%S')
+
+        last_seen_seconds = last_seen_datetime.timestamp()
+        
+        last_seen = last_seen_seconds
+        
         self.tracking_data.setdefault(normal_id, {
 
             'trial_count': 0,
@@ -1092,7 +1110,7 @@ class GlobalMouseTracker:
 
         self.tracking_data[normal_id]['test_time'] += test_time
 
-        self.tracking_data[normal_id]['last_seen'] = datetime.now().strftime("%d-%m-%Y")
+        self.tracking_data[normal_id]['last_seen'] = last_seen_seconds
 
 
 
@@ -1170,11 +1188,11 @@ class GlobalMouseTracker:
 
             'SPEED_XY': '200',
 
-            'MAX_RECORDING_TIME_MIN': '3',
+            'MAX_RECORDING_TIME_MIN': '30',
 
             'RECORDING_DELAY_SEC': '2',
 
-            'PIEZO_THRESHOLD': '4.49',
+            'PIEZO_THRESHOLD': '8',
 
             'NUM_TRIALS_PER_MOUSE': '2',
 
@@ -1185,8 +1203,6 @@ class GlobalMouseTracker:
             'DAILY_TRIAL_CAP': '10',
 
             'MAX_DAILY_TIME_MIN': '10',
-
-            'DEBUG': '0',
 
             'CAMERA_RESOLUTION':'640x480',
 
@@ -1227,10 +1243,12 @@ class GlobalMouseTracker:
             'CAMERA_USB_SERIAL_IDENTIFICATION_STRING': 'Gearway Electronics' ,
 
             'RPI_PIN_IR_LED_ARRAY': '6',
-
+            }
+        
+        config['FEATURES'] = {
+            'USE_PEZO_TRIGGER': 'yes',
+            'DEBUG': 'no',
         }
-
-
 
         with open(CONFIG_FILE_PATH, 'w') as configfile:
 
@@ -1253,8 +1271,6 @@ class GlobalMouseTracker:
         config = configparser.ConfigParser()
 
         config.read(CONFIG_FILE_PATH)
-
-
 
         self.X_HOME_POS = int(config['SYSTEM_SETTINGS']['X_HOME_POS'])
 
@@ -1320,9 +1336,12 @@ class GlobalMouseTracker:
 
         self.RPI_PIN_IR_LED_ARRAY = str(config['SYSTEM_SETTINGS']['RPI_PIN_IR_LED_ARRAY'])
 
+        self.DEBUG = str(config['FEATURES']['DEBUG'])
+        
+        self.USE_PEZO_TRIGGER = str(config['FEATURES']['USE_PEZO_TRIGGER'])
 
 
-        print("\n Config Loaded \n")
+        print(f"\nConfig at {os.path.basename(CONFIG_FILE_PATH)} has been Loaded \n")
 
 
 
@@ -1355,11 +1374,15 @@ class GlobalMouseTracker:
     def log_trial(self, raw_id, trial_duration, completed, interrupted):
 
         normal_id = self._get_normal_id(raw_id)
+        
+        last_seen_datetime_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        last_seen = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+        last_seen_datetime = datetime.strptime(last_seen_datetime_str, '%Y-%m-%d %H:%M:%S')
 
-
-
+        last_seen_seconds = last_seen_datetime.timestamp()
+        
+        last_seen = last_seen_seconds
+        
         with self.lock:
 
             with open(self.trial_log_file, 'a', newline='') as f:
@@ -2055,51 +2078,57 @@ class Periphals:
     global IRState
 
     def __init__(self):
-
-        #self.RFID_SER = Get_usb_devices(RFID_USB_SERIAL_IDENTIFICATION_STRING)
-
-        #if self.RFID_SER == None:
-
-        self.RFID_SER = '/dev/ttyUSB1'
-
-            
-
-    def quick_ir_check(self):
-
         
+        self.RFID_SER = None
 
-     try:
 
-        global IRState
+    def INIT_RFID(self):
+        
+        self.RFID_SER = Get_usb_devices(RFID_USB_SERIAL_IDENTIFICATION_STRING)
 
-        global Interrupt_
+        if self.RFID_SER == None:
 
-        if GPIO.input(IRBreakerPin) == GPIO.HIGH:
+            self.RFID_SER = '/dev/ttyUSB1'
 
-            IRState = False
 
-            Interrupt_ = True
+    def Thread_ir_check(self):      
 
-            print(f"IR_CHECK_IN:{str(IRState)}")
-
-        else:
-
-            print("MOUSE IN!....Awaiting RFID TAG")
-
-            IRState = True
-
-            return True
-
-     except Exception as e:
-
+        global Interrupt_, IRState,IRBreakerPin
+        try:
+            while True:
+                if GPIO.input(IRBreakerPin) == GPIO.HIGH:
+                    IRState = False
+                    Interrupt_ = True
+                    print("\nBeam OPEN, NO SUBJECT!\n")
+                else:
+                    IRState = True
+                    Interrupt_ = False
+                    #print("\nBeam Closed\n")
+    
+                time.sleep(3)  
+        except Exception as e:
             print(f"Error reading IR breaker: {str(e)}")
-
             return False
 
-        
 
         
 
+        
+    def quick_ir_check_V2(self):
+        global Interrupt_, IRState,IRBreakerPin
+        try:
+            while GPIO.input(IRBreakerPin) == GPIO.HIGH:
+                IRState = False
+                Interrupt_ = True
+            else:
+                print("MOUSE IN!")
+                IRState = True
+                Interrupt_ = False
+                return True
+            time.sleep(1)  
+        except Exception as e:
+            print(f"Error reading IR breaker: {str(e)}")
+            return False
 
 
 
@@ -2273,32 +2302,14 @@ class Stepper(Enum):
 ProfileID = " -Defualt"
 
 def display_welcome_banner():
-
     print("""
-
-
-
- ___       ________  ________          ________  ___  ___       ________  ________  ___     
-
-|\  \     |\   __  \|\   __  \        |\   ____\|\  \|\  \     |\   __  \|\   ____\|\  \    
-
-\ \  \    \ \  \|\  \ \  \|\ /_       \ \  \___|\ \  \ \  \    \ \  \|\  \ \  \___|\ \  \   
-
- \ \  \    \ \   __  \ \   __  \       \ \_____  \ \  \ \  \    \ \   __  \ \_____  \ \  \  
-
-  \ \  \____\ \  \ \  \ \  \|\  \       \|____|\  \ \  \ \  \____\ \  \ \  \|____|\  \ \  \ 
-
-   \ \_______\ \__\ \__\ \_______\        ____\_\  \ \__\ \_______\ \__\ \__\____\_\  \ \__\
-
-    \|_______|\|__|\|__|\|_______|       |\_________\|__|\|_______|\|__|\|__|\_________\|__|
-
-                                         \|_________|                       \|_________|    
-
+â–—â–– â–—â–– â–—â–„â––  â–—â–„â–„â––â–—â–„â–„â––  â–—â–„â––      â–—â–„â–„â––â–—â––  â–—â––â–—â–„â–„â––
+â–â–Œ â–â–Œâ–â–Œ â–â–Œâ–â–Œ   â–â–Œ â–â–Œâ–â–Œ â–â–Œ    â–â–Œ    â–â–šâ–žâ–˜â–â–Œ   
+â–â–›â–€â–œâ–Œâ–â–›â–€â–œâ–Œ â–â–€â–šâ––â–â–›â–€â–šâ––â–â–›â–€â–œâ–Œ     â–â–€â–šâ––  â–â–Œ  â–â–€â–šâ––
+â–â–Œ â–â–Œâ–â–Œ â–â–Œâ–—â–„â–„â–žâ–˜â–â–Œ â–â–Œâ–â–Œ â–â–Œ    â–—â–„â–„â–žâ–˜  â–â–Œ â–—â–„â–„â–žâ–˜
     """)
 
 def open_folder(folder_path):
-
-    # Check if the folder exists
 
     if os.path.exists(folder_path):
 
@@ -2343,11 +2354,6 @@ def admin_menu():
         return
 
 
-
-    #laceholder
-
-
-
     return
 
 def Get_usb_devices(device_search):
@@ -2355,6 +2361,7 @@ def Get_usb_devices(device_search):
     serial_finder = SerialDeviceFinder()
 
     device_serial_conn = None
+    #print(f"Method A was called by: {get_caller_method()}")
 
     if device_search == None:
 
@@ -2384,229 +2391,160 @@ def Get_usb_devices(device_search):
 
         return device_serial_conn
 
+def wait_for_mouse(RFID_TAG_RAW,peripheral_instance = None):
+
+    global Interrupt_
+    global IRState
     
 
+    
+    
+    print("Waiting for mouse...")
+    if peripheral_instance == None:
 
+        peripheral_instance = Periphals()
+        IRState = peripheral_instance.quick_ir_check_V2()
+    
 
-
-
-        
-
-def RFID_TAG_CHECK():
-
-    global RFID_TAG_RAW
-
-    try:
-
-        RFID_TAG_RAW = "MOUSE_ID_12345"
-
-        print(f"\nTAG FOUND - {RFID_TAG_RAW}")
-
-        return True
-
-    except:
-
-        print("TAG READ FAILED!")
-
-        return False
-
+    RFID_TF = None
+    
+    if IRState != False:
+         print("\nBeam Broken, Checking for MOUSE ID....\n")
+         while RFID_TF == None:
+            print("\nWaiting For Tag")
+            RFID_TF = async_to_sync(peripheral_instance.READTAG)()
+         else:
+            print(f"RFID - {RFID_TAG_RAW}")
+            return True
+    
     return False
 
-def RETURN_RFID_TAG_CHECK():
-
-
-
-    if RFID_TAG_RAW is not None:
-
-        F_Val = str(RFID_TAG_RAW)
-
-    return F_Val
-
-def wait_for_mouse(RFID_TAG_RAW):
-
-    
-
-    print("Waiting for mouse...")
-
-    peripheral_instance = Periphals()
-
-    beam_break_result = peripheral_instance.quick_ir_check()
-
-    RFID_TAG_RAW =  async_to_sync(peripheral_instance.READTAG)()
-
-    if beam_break_result and RFID_TAG_RAW == None:
-
-        print("\nBeam Broken, Checking for MOUSE ID....\n")
-
-        #beam is broken but we don't have RFID
-
-        RFID_TF = async_to_sync(peripheral_instance.READTAG)()
-
-    print(f"RFID - {RFID_TAG_RAW}")
-
-    return True
-
 @async_to_sync
-
-async def present_pellet(self, CurrentMouseID,NUM_TRIALS_PER_MOUSE, periphals_instance, Trail_Number,PIEZO_DIR):
-
+async def present_pellet(self, CurrentMouseID, NUM_TRIALS_PER_MOUSE, periphals_instance, Trail_Number, PIEZO_DIR):
     global RECORDING_DIR
-
     global THRESHOLD_EXCEEDED
-
-
-
-    """Handle pellet presentation sequence"""
-
+    global IRState
+    global Interrupt_
+   #Handle pellet presentation sequence
     periphals_instance = Periphals()
-
-    Interrupt_ = False
-
-    while periphals_instance.quick_ir_check() != False :
-
-    
-
-        # while GPIO.input(IRBreakerPin) == GPIO.LOW:  # while mouse IN
-
-
-
+    print(f"IRSate={IRState}")
+    while periphals_instance.quick_ir_check_V2() != False:
         print("EXTEND")
-
-
-
         periphals_instance.extend_actuator()
-
-
-
         await asyncio.sleep(3)
-
-       
-
-        
-
+        if Interrupt_:
+            return False
         print("RETRACT")
-
-
-
         periphals_instance.retract_actuator()
-
-
-
         await asyncio.sleep(1.5)
-
-
-
         periphals_instance.stop_actuator()
 
-
-
-        #await asyncio.sleep(1.3)
-
-        # Start recording
-
+        #Start recording
         threads = []
-
-        
-
         print("Starting camera recording...")
-
         print(f"Recording to: {RECORDING_DIR}")
-
-        Interrupt_ = False
-
-
-
-        # Start multiple threads        
-
-        recorder = VideoRecorder(duration_seconds=10, fps=320,output_dir=RECORDING_DIR)
-
-        def camera_thread_function():
-
-            print("Camera thread started")
-
-            recorder.record_video()
-
-            print("Camera thread finished")
-
-
-
-        Camera_thread = threading.Thread(target=camera_thread_function)        
-
-        Camera_thread.start()    
-
-        threads.append(Camera_thread)
-
-
-
-        print("Main thread continues executing immediately, PIEZO DATA RECORDING")
-
+        if Interrupt_:
+            return False
+        recorder = VideoRecorder(duration_seconds=10, fps=320, output_dir=RECORDING_DIR)
         PiezoRecorder_ = PiezoRecorder()
 
+        camera_completed = threading.Event()
+        piezo_completed = threading.Event()
+
+        def camera_thread_function():
+            try:
+                print("Camera thread started")
+                recorder.record_video()
+            finally:
+                print("Camera thread finished")
+                camera_completed.set()
+
+
+        Camera_thread = threading.Thread(target=camera_thread_function)
+
         def piezo_thread_function():
+            try:
+                print("Piezo thread started")
+                PiezoRecorder_.Record_PelletData(CurrentMouseID, Trail_Number, PIEZO_DIR,recorder)
+            finally:
+                print("Piezo thread finished")
+                piezo_completed.set()
 
-            print("Piezo thread started")
-
-            PiezoRecorder_.Record_PelletData(CurrentMouseID, Trail_Number, PIEZO_DIR)
-
-            print("Piezo thread finished")
-
-
-
-        Pizeo_thread = threading.Thread(target=piezo_thread_function)       
-
+        
+        Pizeo_thread = threading.Thread(target=piezo_thread_function)
+        if Interrupt_:
+            return False
+        Camera_thread.start()
         Pizeo_thread.start()
-
-        threads.append(Pizeo_thread)
-
-        #PiezoRecorder_.Record_PelletData(CurrentMouseID,Trail_Number,PIEZO_DIR)
-
-        while THRESHOLD_EXCEEDED.is_set():
-
-            Interrupt_ = True
-
-            recorder.Stop()
-
-            await asyncio.sleep(0.1) 
-
-            print("Threshold was exceeded, suspending operations...")
-
-            break
-
+        threads.extend([Camera_thread, Pizeo_thread])
+        if Interrupt_:
+            return False
+        # Monitor for THRESHOLD_EXCEEDED
+        while not (camera_completed.is_set() and piezo_completed.is_set()):
+            if THRESHOLD_EXCEEDED.is_set():
+                print("Threshold exceeded, initiating graceful shutdown...")
+                
+                # Stop recording
+                recorder.Stop()
+                PiezoRecorder_.Stop()
+                
+                # Wait for thread with timeout
+                for thread in threads:
+                    thread.join(timeout=2.0)
+                    if thread.is_alive():
+                        print(f"Warning: {thread.name} did not complete in time")
+                
+                print("Recording stopped, threshold was exceeded")
+                periphals_instance.stop_actuator()
+                THRESHOLD_EXCEEDED.clear()
+                return True  # Mark as completed successfully
             
+            
+            
+            await asyncio.sleep(0.1)
 
-        print("Now waiting for background threads to complete...")
-
-        THRESHOLD_EXCEEDED.clear()
-
-        await asyncio.sleep(MAX_RECORDING_TIME_MIN) 
-
-        Interrupt_ = True 
-
+        print("Waiting for maximum recording time...")
+        #await asyncio.sleep(MAX_RECORDING_TIME_MIN)
+        
+     
+        recorder.Stop()
+        PiezoRecorder_.Stop()
+        if Interrupt_:
+            return False
+        # Wait for threads
         for thread in threads:
-
             thread.join()
+            print(f"{thread.name} completed")
 
-            print("Thread completed, continuing with execution")
-
-        periphals_instance.stop_actuator()        
-
+        periphals_instance.stop_actuator()
         await asyncio.sleep(0.1)
-
         return True
 
     else:
-
-        print(f"MOUSE_LEFT\n Test Number {int(Trail_Number)+1} Failed! ")
-
+        print(f"MOUSE_LEFT\n Test Number {int(Trail_Number)+1} Failed!")
         periphals_instance.extend_actuator()
-
         return False
 
-# Modified main function
+def check_ir_breaker():
+    global Interrupt_, IRState,IRBreakerPin
+    try:
+        while GPIO.input(IRBreakerPin) == GPIO.HIGH:
+            IRState = False
+            Interrupt_ = True
+            #print(f"IR_CHECK_IN:{str(IRState)}")
+        else:
+            print("MOUSE IN!....Awaiting RFID TAG")
+            IRState = True
+            Interrupt_ = False
+            return True
+        time.sleep(1)  
+    except Exception as e:
+        print(f"Error reading IR breaker: {str(e)}")
+        return False
 
 def main(SingleTrackedData,Mouse_Dir,periphals_instance):
 
-    global RECORDING_DIR,NUM_TRIALS_PER_MOUSE
+    global RECORDING_DIR,NUM_TRIALS_PER_MOUSE,Interrupt_
 
     RECORDING_DIR = os.path.join(Mouse_Dir, "Video_Recordings")
 
@@ -2632,10 +2570,10 @@ def main(SingleTrackedData,Mouse_Dir,periphals_instance):
 
     print("Starting Automated Sequence...")
 
-    Interrupt_ = False
 
     PIEZO_DIR = os.path.join(Mouse_Dir, "Piezo_Recordings")
-
+    if Interrupt_:
+            return False
 
 
     while not Interrupt_:
@@ -2667,11 +2605,14 @@ def main(SingleTrackedData,Mouse_Dir,periphals_instance):
             time.sleep(1)
 
             while trials_completed_today < NUM_TRIALS_PER_MOUSE:
-
+              if Interrupt_:
+                  print("IR beam broken, suspending test.")
+                  return trials_completed_today
               # Present pellet
 
               print("Presenting pellet...")
-
+              if Interrupt_:
+                  return False
               if (present_pellet(RFID_TAG_RAW, NUM_TRIALS_PER_MOUSE, ProfileID,periphals_instance,trials_completed_today,PIEZO_DIR)):
 
                   print("Iteration_Complete")
@@ -2692,7 +2633,7 @@ def main(SingleTrackedData,Mouse_Dir,periphals_instance):
 
               else:
 
-                  if periphals_instance.quick_ir_check() != False :
+                  if Interrupt_ :
 
                     print("IR BREAK ")
 
@@ -2802,6 +2743,19 @@ async def save_session_data():
 
     return True
 
+def get_caller_method():
+    
+    frame = inspect.currentframe()
+    try:
+        caller_frame = frame.f_back.f_back
+        if caller_frame is None:
+            return "No caller method (called from module level)"
+        
+        caller_method = caller_frame.f_code.co_name
+        return caller_method
+    finally:
+        del frame
+
 def run_system(tracker):
 
     admin_Open = False
@@ -2812,7 +2766,6 @@ def run_system(tracker):
 
     global Interrupt_
 
-    Interrupt_ = False
 
     if debug_mode:
 
@@ -2834,153 +2787,140 @@ def run_system(tracker):
 
     periphals_instance = Periphals()
 
+    periphals_instance.INIT_RFID()
+     
     Current_Mouse.tracker = tracker
 
     led = IRLedControl()
 
     led.off()
 
-
+    # Start the IR breaker checking thread
+    #ir_thread = threading.Thread(target=check_ir_breaker)periphals_instance.Thread_ir_check
+    ir_thread = threading.Thread(target=periphals_instance.Thread_ir_check)
+    ir_thread.daemon = True
+    ir_thread.start()
 
     while True:
-
-          global RFID_TAG_RAW
-
-          RFID_TAG_RAW = None
-
-          if wait_for_mouse(RFID_TAG_RAW):
-
-              mouse_id = RFID_TAG_RAW 
-
-              led.on()
-
-               # Function to get the current mouse ID
-
-             # tracker.update_tracking(RFID_TAG_RAW, trials=0, test_time=0)
-
-              Tracker_Data = Current_Mouse.tracker.get_mouse_data(mouse_id)
-
-              Current_Mouse.normal_id = tracker._get_normal_id(mouse_id)
-
-              Current_Mouse.raw_id = tracker.RAW_ID
-
-              Current_Mouse.trial_count = Tracker_Data['trial_count']
-
-              Current_Mouse.test_time = Tracker_Data['test_time']
-
-              Current_Mouse.last_seen = Tracker_Data['last_seen']
-
-              print(f"Mouse Last seen: {Current_Mouse.last_seen}")
-
-              if Current_Mouse != None:
-
-                  print(f"\nTrials: {Current_Mouse.trial_count}, Time: {Current_Mouse.test_time} \n")
-
-              Old_Count =  Current_Mouse.trial_count
-
-              Old_Test_time_today =  Current_Mouse.test_time
-
-          global MOUSE_DIR
-
-          MOUSE_DIR = os.path.join(HOME_DIR, str(Current_Mouse.normal_id) +" - " + str(Current_Mouse.raw_id) + "/" + str(datetime.now().strftime("%d-%m-%Y")) )
-
-          LOG_DIR = os.path.join(MOUSE_DIR, "Logs")
-
-          try:
-
-            os.makedirs(MOUSE_DIR, exist_ok=True)
-
-            os.makedirs(LOG_DIR, exist_ok=True)
-
-          except ValueError as e:
-
-            print(f"Error: {e}")
-
-            return
-
-            
-
-          tracker.trial_log_file = os.path.join(LOG_DIR, str(datetime.now().strftime("%d-%m-%Y")) + "_trial_logs_.csv")
-
-          tracker._ensure_trial_log_exists()
-
-          if Current_Mouse.last_seen == str(datetime.now().strftime("%d-%m-%Y")):
-
-            while periphals_instance.quick_ir_check() != False:
-
-                if Current_Mouse.trial_count < NUM_TRIALS_PER_MOUSE and Current_Mouse.test_time < MAX_DAILY_TIME_MIN:
-
-                    trials_completed = main(Current_Mouse,MOUSE_DIR,periphals_instance)
-
-                    print(f"Trails{trials_completed}")
-
-                    #if trials_completed >= 0:
-
-                        #tracker.update_tracking(RFID_TAG_RAW,Current_Mouse.trail_num_total , Current_Mouse.total_trail_time)
-
-                    time.sleep(2)
-
-                    print(f"\nMouse ID {mouse_id} has completed attempts, restarting.")
-
-                    led.off()
-
+        while IRState == True:
+    
+              global RFID_TAG_RAW
+              global mouse_id
+              
+              RFID_TAG_RAW = None
+              mouse_id = None
+              
+              if wait_for_mouse(RFID_TAG_RAW,periphals_instance):
+                    
+                  mouse_id = None
+                  mouse_id = RFID_TAG_RAW 
+                  
+                  if mouse_id == None:
                     break
-
-                else:
-
-                    led.off()
-
-                    print(f"\nMouse ID {mouse_id} has exceeded daily trials or test time.")
-
-                    print(f"\nRechecking in 10 Seconds For another mouse Without the ID {mouse_id}\n\n\n")                
-
-                    break
-
-            else:
-
-                led.off()
-
-                print(f"\n\nMouse ID {mouse_id} has Left")
-
-                time.sleep(5)
-
-                break
-
-          else:
-
-              Current_Mouse.trial_count = 0
-
-              Current_Mouse.test_time = 0 
-
-              while Interrupt_ != True:
-
-                  trials_completed = main(Current_Mouse,MOUSE_DIR,periphals_instance)
-
-                  print(f"Trails{trials_completed}")
-
-                  #if trials_completed >= 0:
-
-                    #tracker.update_tracking(RFID_TAG_RAW,Current_Mouse.trail_num_total , Current_Mouse.total_trail_time)
-
-                  print(f"\nMouse ID {mouse_id} has exceeded daily trials or test time.")
-
-                  print(f"\nRechecking in 10 Seconds For another mouse Without the ID {mouse_id}\n\n\n")
-
-                  led.off()
-
-                  time.sleep(10)
-
-                  break
-
+                  
+                  led.on()
+    
+                   # Function to get the current mouse ID
+    
+                 # tracker.update_tracking(RFID_TAG_RAW, trials=0, test_time=0)
+    
+                  Tracker_Data = Current_Mouse.tracker.get_mouse_data(mouse_id)
+    
+                  Current_Mouse.normal_id = tracker._get_normal_id(mouse_id)
+    
+                  Current_Mouse.raw_id = tracker.RAW_ID
+    
+                  Current_Mouse.trial_count = Tracker_Data['trial_count']
+    
+                  Current_Mouse.test_time = Tracker_Data['test_time']
+    
+                  Current_Mouse.last_seen = Tracker_Data['last_seen']
+    
+                  print(f"Mouse Last seen: {str(Current_Mouse.last_seen)}")
+    
+                  if Current_Mouse != None:
+    
+                      print(f"\nTrials: {Current_Mouse.trial_count}, Time: {Current_Mouse.test_time} \n")
+    
+                  Old_Count =  Current_Mouse.trial_count
+    
+                  Old_Test_time_today =  Current_Mouse.test_time
+    
+              global MOUSE_DIR
+    
+              MOUSE_DIR = os.path.join(HOME_DIR, str(Current_Mouse.normal_id) +" - " + str(Current_Mouse.raw_id) + "/" + str(datetime.now().strftime("%d-%m-%Y")) )
+    
+              LOG_DIR = os.path.join(MOUSE_DIR, "Logs")
+    
+              try:
+    
+                os.makedirs(MOUSE_DIR, exist_ok=True)
+    
+                os.makedirs(LOG_DIR, exist_ok=True)
+    
+              except ValueError as e:
+    
+                print(f"Error: {e}")
+    
+                return
+    
+                
+    
+              tracker.trial_log_file = os.path.join(LOG_DIR, str(datetime.now().strftime("%d-%m-%Y")) + "_trial_logs_.csv")
+    
+              tracker._ensure_trial_log_exists()
+    
+              #if Current_Mouse.last_seen == str(datetime.now().strftime("%d-%m-%Y")):
+    
+              while not Interrupt_:
+        
+                    if Current_Mouse.trial_count < NUM_TRIALS_PER_MOUSE and Current_Mouse.test_time < MAX_DAILY_TIME_MIN:
+        
+                        trials_completed = main(Current_Mouse,MOUSE_DIR,periphals_instance)
+        
+                        print(f"Trails{trials_completed}")
+        
+                        if trials_completed >= 0:
+        
+                            tracker.update_tracking(RFID_TAG_RAW,Current_Mouse.trail_num_total , Current_Mouse.total_trail_time)
+        
+                        time.sleep(2)
+        
+                        print(f"\nMouse ID {mouse_id} has completed attempts, restarting.")
+        
+                        led.off()
+        
+                        break
+        
+                    else:
+        
+                        led.off()
+        
+                        print(f"\nMouse ID {mouse_id} has exceeded daily trials or test time.")
+        
+                        print(f"\nRechecking in 10 Seconds For another mouse Without the ID {mouse_id}\n\n\n")                
+        
+                        break
+        
               else:
+                    
+                    led.off()
+    
+                    print(f"\n\nMouse ID {mouse_id} Interrupted")
+    
+                    print(f"\nRechecking in 10 Seconds For another mouse Without the ID {mouse_id}\n\n\n")
+    
+    
+                    time.sleep(10)
+                    
+                    break
+            
+        else:
+          print(f"\n\Waiting For Mouse")
+          time.sleep(2)
 
-                led.off()
 
-                print(f"\n\nMouse ID {mouse_id} has Left")
-
-                time.sleep(5)
-
-                break
+    
 
 def input_available():
 
@@ -3036,17 +2976,13 @@ def input_available():
 
             t.start()
 
-            time.sleep(0.1)  # Brief pause to check
+            time.sleep(0.1) 
 
             return key_check.key_pressed
 
-    else:  # Unix-like systems (Linux, macOS)
+    else:  
 
         import select
-
-        #print("\n \n Found - Linux \n \n ")
-
-        # Use select with a timeout of 0 seconds
 
         rlist, _, _ = select.select([sys.stdin], [], [], 0)
 
@@ -3061,222 +2997,3 @@ if __name__ == "__main__":
     setup(tracker)
 
     run_system(tracker)
-'''
-#glbal flag for IR interruptio
-global IR_INTERRUPT
-IR_INTERRUPT = False
-
-def quick_ir_check(self):
-    global IR_INTERRUPT
-    try:
-        if GPIO.input(IRBreakerPin) == GPIO.HIGH:
-            IRState = False
-            Interrupt_ = True
-            IR_INTERRUPT = True  # Set the global IR interrupt flag
-            print(f"IR_CHECK_IN:{str(IRState)}")
-        else:
-            print("MOUSE IN!....Awaiting RFID TAG")
-            IRState = True
-            return True
-    except Exception as e:
-        print(f"Error reading IR breaker: {str(e)}")
-        return False
-
-# Modify the main function to check for IR interruption
-def main(SingleTrackedData, Mouse_Dir, periphals_instance):
-    global RECORDING_DIR, NUM_TRIALS_PER_MOUSE, IR_INTERRUPT
-    RECORDING_DIR = os.path.join(Mouse_Dir, "Video_Recordings")
-    StepperManager_ = StepperManager()
-    try:
-        os.makedirs(RECORDING_DIR, exist_ok=True)
-    except Exception as e:
-        print(f"An error occurred: {e}")
-
-    trials_completed_today = SingleTrackedData.trial_count
-    tracker = SingleTrackedData.tracker
-    Trail_Elements = []
-    print(f"Starting trials for mouse with RFID: {RFID_TAG_RAW}")
-    print("Starting Automated Sequence...")
-    Interrupt_ = False
-    PIEZO_DIR = os.path.join(Mouse_Dir, "Piezo_Recordings")
-
-    while not Interrupt_:
-        trial_start = time.time()
-        max_duration = MAX_RECORDING_TIME_MIN * 60
-        completed = False
-        interrupted = False
-        print("Homing motors...")
-        StepperManager_.home_motors()
-        time.sleep(1.1)
-        try:
-            # Move to stage home coordinates
-            print("Moving to stage Test position...")
-            StepperManager_.step_motor(StepperA_STEP_PIN, StepperA_DIR_PIN, StepperA_enable, True, X_HOME_POS)
-            StepperManager_.step_motor(StepperB_STEP_PIN, StepperB_DIR_PIN, StepperB_enable, True, Y_HOME_POS)
-            time.sleep(1)
-            while trials_completed_today < NUM_TRIALS_PER_MOUSE:
-                # Check for IR interruption before starting a new trial
-                if IR_INTERRUPT:
-                    print("IR beam broken, suspending test.")
-                    return trials_completed_today
-
-                # Present pellet
-                print("Presenting pellet...")
-                if (present_pellet(RFID_TAG_RAW, NUM_TRIALS_PER_MOUSE, ProfileID, periphals_instance, trials_completed_today, PIEZO_DIR)):
-                    print("Iteration_Complete")
-                    completed = True
-                    interrupted = False
-                    trials_completed_today += 1
-                    trial_end = time.time()
-                    trial_duration = trial_end - trial_start
-                    new_trail_element = Trail_Element(trials_completed_today, trial_duration, completed, interrupted, RFID_TAG_RAW)
-                    Trail_Elements.append(new_trail_element)
-                else:
-                    if periphals_instance.quick_ir_check() != False:
-                        print("IR BREAK")
-                        break
-                    print("Sequence Failed")
-                    completed = False
-                    interrupted = True
-                    trials_completed_today += 1
-                    trial_end = time.time()
-                    trial_duration = trial_end - trial_start
-                    new_trail_element = Trail_Element(trials_completed_today, trial_duration, completed, interrupted, RFID_TAG_RAW)
-                    Trail_Elements.append(new_trail_element)
-
-                # Wait between iterations
-                time.sleep(1.5)
-                # Check for time limit
-                if (time.time() - trial_start) >= max_duration:
-                    completed = True
-                    interrupted = True
-                    print("Time Exceeded! - Exiting!")
-                    break
-
-            else:
-                trial_end = time.time()
-                trial_duration = trial_end - trial_start
-                # Return to home position
-                # Clean up
-                print("Sequences completed successfully")
-                print(f"Sessions complete: {trials_completed_today} trials")
-                print("Returning to home position...")
-                periphals_instance.extend_actuator()
-                StepperManager_.home_motors()
-                for trail_element in Trail_Elements:
-                    tracker.log_trial(
-                        trail_element.rfid_tag,          # RFID_TAG_RAW
-                        trail_element.trial_duration,   # trial_duration
-                        trail_element.completed,        # completed
-                        trail_element.interrupted       # interrupted
-                    )
-                    SingleTrackedData.add_trail_element(Trail_Element(trials_completed_today, trial_duration, completed, interrupted, RFID_TAG_RAW))
-                time.sleep(0.5)
-                tracker.update_tracking(RFID_TAG_RAW, trials_completed_today, trial_duration)
-                return trials_completed_today
-        except ValueError as e:
-            print(f"Error: {e}")
-            return trials_completed_today
-    else:
-        print("MOUSE LEFT!")
-        return trials_completed_today
-
-@async_to_sync
-async def present_pellet(self, CurrentMouseID, NUM_TRIALS_PER_MOUSE, periphals_instance, Trail_Number, PIEZO_DIR):
-    global RECORDING_DIR
-    global THRESHOLD_EXCEEDED
-
-   #Handle pellet presentation sequence
-    periphals_instance = Periphals()
-    Interrupt_ = False
-    
-    while periphals_instance.quick_ir_check() != False:
-        print("EXTEND")
-        periphals_instance.extend_actuator()
-        await asyncio.sleep(3)
-        
-        print("RETRACT")
-        periphals_instance.retract_actuator()
-        await asyncio.sleep(1.5)
-        periphals_instance.stop_actuator()
-
-        #Start recording
-        threads = []
-        print("Starting camera recording...")
-        print(f"Recording to: {RECORDING_DIR}")
-        Interrupt_ = False
-
-        recorder = VideoRecorder(duration_seconds=10, fps=320, output_dir=RECORDING_DIR)
-        PiezoRecorder_ = PiezoRecorder()
-
-        camera_completed = threading.Event()
-        piezo_completed = threading.Event()
-
-        def camera_thread_function():
-            try:
-                print("Camera thread started")
-                recorder.record_video()
-            finally:
-                print("Camera thread finished")
-                camera_completed.set()
-
-        def piezo_thread_function():
-            try:
-                print("Piezo thread started")
-                PiezoRecorder_.Record_PelletData(CurrentMouseID, Trail_Number, PIEZO_DIR)
-            finally:
-                print("Piezo thread finished")
-                piezo_completed.set()
-
-        
-        Camera_thread = threading.Thread(target=camera_thread_function)
-        Pizeo_thread = threading.Thread(target=piezo_thread_function)
-        
-        Camera_thread.start()
-        Pizeo_thread.start()
-        threads.extend([Camera_thread, Pizeo_thread])
-
-        # Monitor for THRESHOLD_EXCEEDED
-        while not (camera_completed.is_set() and piezo_completed.is_set()):
-            if THRESHOLD_EXCEEDED.is_set():
-                print("Threshold exceeded, initiating graceful shutdown...")
-                
-                # Stop recording
-                recorder.Stop()
-                PiezoRecorder_.Stop()
-                
-                # Wait for thread with timeout
-                for thread in threads:
-                    thread.join(timeout=2.0)
-                    if thread.is_alive():
-                        print(f"Warning: {thread.name} did not complete in time")
-                
-                print("Recording stopped, threshold was exceeded")
-                periphals_instance.stop_actuator()
-                THRESHOLD_EXCEEDED.clear()
-                return True  # Mark as completed successfully
-                
-            await asyncio.sleep(0.1)
-
-        #  wait for max recording time
-        print("Waiting for maximum recording time...")
-        await asyncio.sleep(MAX_RECORDING_TIME_MIN)
-        
-     
-        recorder.Stop()
-        PiezoRecorder_.Stop()
-        
-        # Wait for threads
-        for thread in threads:
-            thread.join()
-            print(f"{thread.name} completed")
-
-        periphals_instance.stop_actuator()
-        await asyncio.sleep(0.1)
-        return True
-
-    else:
-        print(f"MOUSE_LEFT\n Test Number {int(Trail_Number)+1} Failed!")
-        periphals_instance.extend_actuator()
-        return False
-'''
