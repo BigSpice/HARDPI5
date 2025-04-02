@@ -78,6 +78,65 @@ global RPI_PIN_IR_LED_ARRAY , USE_PEZO_TRIGGER
 IRState = False
 
 Interrupt_ = False
+def install_package(package_name):
+
+  
+
+
+
+    # Check if the package is already installed
+
+
+
+    if importlib.util.find_spec(package_name) is None:
+
+
+
+        print(f"{package_name} not found. Installing...")
+
+
+
+        try:
+
+
+
+            # Install the package using pip
+
+
+
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+
+
+
+            print(f"Successfully installed {package_name}")
+
+
+
+            return True
+
+
+
+        except subprocess.CalledProcessError as e:
+
+
+
+            print(f"Error installing {package_name}: {e}")
+
+
+
+            return False
+
+
+
+    else:
+
+
+
+        print(f"{package_name} is already installed")
+
+
+
+        return True
 
 def Interrupt():
 
@@ -164,65 +223,6 @@ except ImportError:
 
         install_package(package)
 
-def install_package(package_name):
-
-  
-
-
-
-    # Check if the package is already installed
-
-
-
-    if importlib.util.find_spec(package_name) is None:
-
-
-
-        print(f"{package_name} not found. Installing...")
-
-
-
-        try:
-
-
-
-            # Install the package using pip
-
-
-
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-
-
-
-            print(f"Successfully installed {package_name}")
-
-
-
-            return True
-
-
-
-        except subprocess.CalledProcessError as e:
-
-
-
-            print(f"Error installing {package_name}: {e}")
-
-
-
-            return False
-
-
-
-    else:
-
-
-
-        print(f"{package_name} is already installed")
-
-
-
-        return True
 
 def setup(tracker):
 
