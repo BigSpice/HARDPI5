@@ -228,7 +228,31 @@ except ImportError:
 
 def setup(tracker):
 
-    Add_Tracker_Data_To_Global_Sheet()
+     # Define global variables
+
+    global X_HOME_POS, Y_HOME_POS, ARM_HEIGHT_POS, SPEED_XY
+
+    global MAX_RECORDING_TIME_MIN, RECORDING_DELAY_SEC, PIEZO_THRESHOLD
+
+    global NUM_TRIALS_PER_MOUSE, SAVE_DATA_PATH, PREFERRED_PAW
+
+    global DAILY_TRIAL_CAP, MAX_DAILY_TIME_MIN
+
+    global StepperA_enable, StepperB_enable, StepperA_STEP_PIN, StepperB_STEP_PIN, StepperA_DIR_PIN, StepperB_DIR_PIN
+
+    global home_switch1, home_switch2, relay1, relay2, IRBreakerPin, PiezoPin
+
+    global DISTANCE_STEPPER_IN_STEPS, CAMERA_TARGET_FRAMERATE, STEPS_PER_REV, CAMERA_RESOLUTION
+
+    global DEBUG
+
+    global THRESHOLD_EXCEEDED
+
+    global RFID_USB_SERIAL_IDENTIFICATION_STRING, ARDUINO_USB_SERIAL_IDENTIFICATION_STRING, CAMERA_USB_SERIAL_IDENTIFICATION_STRING
+
+    global RPI_PIN_IR_LED_ARRAY , USE_PEZO_TRIGGER
+
+    Add_Tracker_Data_To_Global_Sheet(tracker)
 
     #Initialize GPIO settings
 
@@ -274,7 +298,7 @@ def setup(tracker):
 
     
 
-def Add_Tracker_Data_To_Global_Sheet():
+def Add_Tracker_Data_To_Global_Sheet(tracker):
 
   
 
