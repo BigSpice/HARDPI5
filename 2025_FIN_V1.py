@@ -917,7 +917,7 @@ class GlobalMouseTracker:
 
         self.StepperA_DIR_PIN = None
 
-        StepperB_DIR_PIN = None
+        self.StepperB_DIR_PIN = None
 
         self.home_switch1 = None
 
