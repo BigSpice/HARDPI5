@@ -2575,6 +2575,15 @@ def check_ir_breaker():
         print(f"Error reading IR breaker: {str(e)}")
         return False
 
+
+
+
+
+
+
+
+
+
 def main(SingleTrackedData,Mouse_Dir,periphals_instance):
 
     global RECORDING_DIR,NUM_TRIALS_PER_MOUSE,Interrupt_
