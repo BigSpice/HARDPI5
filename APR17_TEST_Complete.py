@@ -54,7 +54,6 @@ MAPPING_FILE = os.path.join(CONFIG_DIR, "mouse_id_mapping.csv")
 TRACKING_FILE = os.path.join(CONFIG_DIR, "mouse_tracking.csv")
 
 
-
 # Define global variables
 
 global X_HOME_POS, Y_HOME_POS, ARM_HEIGHT_POS, SPEED_XY
