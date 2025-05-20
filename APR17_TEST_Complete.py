@@ -1370,7 +1370,7 @@ class GlobalMouseTracker:
         self.USE_PEZO_TRIGGER = str(config['FEATURES']['USE_PEZO_TRIGGER'])
 
 
-        print(f"\nConfig at {os.path.basename(CONFIG_FILE_PATH)} has been Loaded \n")
+        print(f"\n \n \n \nConfig at {os.path.basename(CONFIG_FILE_PATH)} has been Loaded \n")
 
 
 
@@ -2518,7 +2518,9 @@ async def present_pellet(self, CurrentMouseID, NUM_TRIALS_PER_MOUSE, periphals_i
                 # Stop recording
                 recorder.Stop()
                 PiezoRecorder_.Stop()
-                
+               print("Recording Stopped")
+        print("Piezo Stopped")
+
                 # Wait for thread with timeout
                 for thread in threads:
                     thread.join(timeout=2.0)
@@ -2797,6 +2799,7 @@ def get_caller_method():
         del frame
 
 def run_system(tracker):
+  try:
 
     admin_Open = False
 
@@ -2829,6 +2832,7 @@ def run_system(tracker):
     periphals_instance.INIT_RFID()
      
     Current_Mouse.tracker = tracker
+    print(f"\n\n\ LED CONTROL n\n")
 
     led = IRLedControl()
 
@@ -2957,8 +2961,9 @@ def run_system(tracker):
         else:
           print(f"\n\Waiting For Mouse")
           time.sleep(2)
-
-
+  except Exception as e:
+    print(f"An error occurred: {str(e)}")
+    print("Please check the mouse ID and tracker data.")
     
 
 def input_available():
