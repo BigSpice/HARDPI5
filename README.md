@@ -1,2 +1,3 @@
 # HARDPI5
-Update4d and ready for a test
+Updated and ready for a test
+personal public repo
